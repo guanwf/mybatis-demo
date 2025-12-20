@@ -1,0 +1,28 @@
+
+server:
+  port: 7701
+  servlet:
+    context-path: /
+  tomcat:
+    max-connections: 2000
+    max-threads: 200
+
+spring:
+  application:
+    name: mybatis-demo
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${bas.datasource.host}:${bas.datasource.port}/facdb?useUnicode=true&characterEncoding=utf8&autoReconnect=true&allowMultiQueries=true&serverTimezone=Asia/Shanghai
+    username: ${bas.datasource.username}
+    password: ${bas.datasource.password}
+
+# 方式一：输出到控制台 (简单直接)
+mybatis-plus:
+  configuration:
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+# 方式二：使用 Logback/Slf4j (生产环境推荐)
+# logging:
+#   level:
+#     com.example.mybatis.mapper: debug  # 将你的 Mapper 包路径设为 debug 级别
