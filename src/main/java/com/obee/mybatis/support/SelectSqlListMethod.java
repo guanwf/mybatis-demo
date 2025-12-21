@@ -11,15 +11,15 @@ import org.apache.ibatis.mapping.SqlSource;
  * @author: Guanwf
  * @date: 2025/12/20 19:49
  */
-public class SelectSqlList extends AbstractMethod {
+public class SelectSqlListMethod extends AbstractMethod {
 
     public static final String METHOD_NAME = "selectSqlList";
 
-    public SelectSqlList() {
+    public SelectSqlListMethod() {
         super(METHOD_NAME);
     }
 
-    protected SelectSqlList(String methodName) {
+    protected SelectSqlListMethod(String methodName) {
         super(methodName);
     }
 

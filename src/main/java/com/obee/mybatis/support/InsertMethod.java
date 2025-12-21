@@ -18,7 +18,7 @@ import org.apache.ibatis.mapping.SqlSource;
  *
  * SqlScriptUtils
  */
-public class InsertEntity extends AbstractMethod{
+public class InsertMethod extends AbstractMethod{
     public static final String METHOD_NAME = "insertEntity";
 
 /*
@@ -38,7 +38,7 @@ VALUES
 </script>
 */
 
-    public InsertEntity() {
+    public InsertMethod() {
         super(METHOD_NAME);
     }
 

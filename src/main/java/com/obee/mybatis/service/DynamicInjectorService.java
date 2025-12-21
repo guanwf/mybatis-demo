@@ -2,18 +2,24 @@ package com.obee.mybatis.service;
 
 import com.baomidou.mybatisplus.core.metadata.TableInfo;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
-import com.obee.mybatis.support.InsertEntity;
-import com.obee.mybatis.support.SelectSqlList;
+import com.obee.mybatis.support.InsertBatchEntity;
+import com.obee.mybatis.support.InsertMethod;
+import com.obee.mybatis.support.SelectSqlListMethod;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.apache.ibatis.session.Configuration;
+import org.apache.ibatis.session.ExecutorType;
+import org.apache.ibatis.session.SqlSessionFactory;
 import org.mybatis.spring.SqlSessionTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.Assert;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import org.apache.ibatis.session.SqlSession;
 
 /**
  * @description:
@@ -21,13 +27,21 @@ import java.util.concurrent.ConcurrentHashMap;
  * @date: 2025/12/20 21:31
  */
 @Service
+@Slf4j
 public class DynamicInjectorService {
     private final SqlSessionTemplate sqlSessionTemplate;
+
+    private final SqlSessionFactory sqlSessionFactory; // <--- 新增注入
+
     // 缓存已注册的实体，防止重复注入报错
     private final Map<Class<?>, Boolean> injectedCache = new ConcurrentHashMap<>();
 
-    public DynamicInjectorService(SqlSessionTemplate sqlSessionTemplate) {
+    // 建议分片大小：500-1000
+    private static final int BATCH_SIZE = 1000;
+
+    public DynamicInjectorService(SqlSessionTemplate sqlSessionTemplate,SqlSessionFactory  sqlSessionFactory) {
         this.sqlSessionTemplate = sqlSessionTemplate;
+        this.sqlSessionFactory=sqlSessionFactory;
     }
 
     /**
@@ -44,7 +58,7 @@ public class DynamicInjectorService {
 
         // 3. 构造 Statement ID
         // 既然没有 Mapper 接口，我们就约定 Namespace 就是 Entity 的全类名
-        String statementId = entityClass.getName() + "." + SelectSqlList.METHOD_NAME;
+        String statementId = entityClass.getName() + "." + SelectSqlListMethod.METHOD_NAME;
 
         // 4. 执行查询
         // 此时 MyBatis 里已经有了这个 ID，且 ResultMap 已经指向了 entityClass
@@ -82,14 +96,14 @@ public class DynamicInjectorService {
 
             // D. 检查是否已经注入过 (双重保险)
             // 防止 configuration.addMappedStatement 报 "already contains value" 异常
-            String statementId = currentNamespace + "." + SelectSqlList.METHOD_NAME;
+            String statementId = currentNamespace + "." + SelectSqlListMethod.METHOD_NAME;
             if (configuration.hasStatement(statementId)) {
                 injectedCache.put(entityClass, true);
                 return;
             }
 
             // E. 核心：调用 AbstractMethod.inject()
-            SelectSqlList method = new SelectSqlList();
+            SelectSqlListMethod method = new SelectSqlListMethod();
             // 参数解释：
             // builderAssistant: 我们刚构造的，带着 Configuration 和 Namespace
             // mapperClass: 这里传 entityClass 充数，因为我们没有 Mapper 接口。
@@ -128,13 +142,18 @@ public class DynamicInjectorService {
             Assert.notNull(tableInfo, "实体解析失败: " + entityClass.getName());
 
             // 1. 注入查询方法 (SelectSqlList)
-            if (!configuration.hasStatement(namespace + "." + SelectSqlList.METHOD_NAME)) {
-                new SelectSqlList().inject(assistant, entityClass, entityClass, tableInfo);
+            if (!configuration.hasStatement(namespace + "." + SelectSqlListMethod.METHOD_NAME)) {
+                new SelectSqlListMethod().inject(assistant, entityClass, entityClass, tableInfo);
             }
 
             // 2. 注入插入方法 (InsertEntity) <-- 新增
-            if (!configuration.hasStatement(namespace + "." + InsertEntity.METHOD_NAME)) {
-                new InsertEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            if (!configuration.hasStatement(namespace + "." + InsertMethod.METHOD_NAME)) {
+                new InsertMethod().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+
+            // 3. 注入 InsertBatchEntity <--- 新增
+            if (!configuration.hasStatement(namespace + "." + InsertBatchEntity.METHOD_NAME)) {
+                new InsertBatchEntity().inject(assistant, entityClass, entityClass, tableInfo);
             }
 
             injectedCache.put(entityClass, true);
@@ -143,6 +162,7 @@ public class DynamicInjectorService {
 
     /**
      * 通用插入方法
+     *
      * @param entity 实体对象 (必须有 @TableName 注解)
      * @return 影响行数
      */
@@ -153,11 +173,101 @@ public class DynamicInjectorService {
         injectIfNeed(entityClass);
 
         // 2. 构造 ID
-        String statementId = entityClass.getName() + "." + InsertEntity.METHOD_NAME;
+        String statementId = entityClass.getName() + "." + InsertMethod.METHOD_NAME;
 
         // 3. 执行插入
         // MyBatis 会自动读取 entity 中的属性填充 #{property}
         return sqlSessionTemplate.insert(statementId, entity);
     }
+
+    /**
+     * 批量插入 (带分片处理，性能最优)
+     *
+     * @param entityList 实体列表
+     * @return 成功插入的总条数
+     */
+    @Transactional(rollbackFor = Exception.class) // 开启事务，保证要么全成，要么全败
+    public <T> int insertBatch(List<T> entityList) {
+        if (entityList == null || entityList.isEmpty()) {
+            return 0;
+        }
+
+        Class<?> entityClass = entityList.get(0).getClass();
+
+        // 1. 检查并注入
+        injectIfNeed(entityClass);
+
+        String statementId = entityClass.getName() + "." + InsertBatchEntity.METHOD_NAME;
+        int totalRows = 0;
+
+        // 2. 分片处理 (Performance Consideration)
+        // 避免一次性拼接过长的 SQL 导致 MySQL 报错 "Packet for query is too large"
+        int size = entityList.size();
+        for (int i = 0; i < size; i += BATCH_SIZE) {
+            int end = Math.min(i + BATCH_SIZE, size);
+            List<T> subList = entityList.subList(i, end);
+
+            // 执行分片插入
+            // 注意：参数必须包装在一个 Map 或者 Collection 中，MyBatis 才能识别 collection="list"
+            // SqlSessionTemplate.insert 默认如果传 List，会自动把参数名设为 "list"
+            totalRows += sqlSessionTemplate.insert(statementId, subList);
+
+//            log.debug("Batch insert progress: {}/{}", end, size);
+        }
+
+        return totalRows;
+    }
+
+    /**
+     * JDBC 原生批量插入 (Oracle/全数据库兼容, 高性能)
+     * 原理: 开启 ExecutorType.BATCH，复用预编译语句
+     *
+     * INSERT INTO sys_user (id, name) VALUES (?, ?)。
+     *
+     * @param entityList 实体列表
+     * @return 成功提交的批次数量（注意：JDBC Batch 模式下通常很难精确返回具体的行数，通常返回批次执行结果）
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public <T> void insertBatchJdbc(List<T> entityList) {
+        if (entityList == null || entityList.isEmpty()) {
+            return;
+        }
+
+        Class<?> entityClass = entityList.get(0).getClass();
+
+        // 1. 确保"单条插入"的 MappedStatement 已经注入
+        // JDBC Batch 复用的就是单条插入的 SQL
+        injectIfNeed(entityClass);
+
+        String statementId = entityClass.getName() + "." + InsertBatchEntity.METHOD_NAME;
+
+        // 2. 开启批量 Session
+        // openSession(ExecutorType.BATCH, false) -> false 表示不自动提交事务
+        try (SqlSession batchSession = sqlSessionFactory.openSession(ExecutorType.BATCH, false)) {
+            int size = entityList.size();
+            for (int i = 0; i < size; i++) {
+                // 3. 循环调用插入
+                // 注意：这里看起来是循环，但因为是 BATCH 模式，MyBatis 并不会每条都发给数据库
+                // 它会把参数暂存在本地，等待 flushStatements
+                batchSession.insert(statementId, entityList.get(i));
+
+                // 4. 分批提交 (防止内存溢出)
+                if ((i + 1) % BATCH_SIZE == 0 || i == size - 1) {
+                    batchSession.flushStatements();
+                    // 对于非 Spring 管理的 session，需要手动 commit 确保数据落盘
+                    // 但通常建议只 flush，最后统一 commit，或者配合外层 @Transactional
+                }
+            }
+
+            // 5. 提交事务
+            batchSession.commit();
+            // 清理缓存
+            batchSession.clearCache();
+        } catch (Exception e) {
+//            log.error("批量插入失败", e);
+            throw new RuntimeException("批量插入失败", e);
+        }
+    }
+
 
 }

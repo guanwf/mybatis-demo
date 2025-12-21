@@ -26,3 +26,10 @@ mybatis-plus:
 # logging:
 #   level:
 #     com.example.mybatis.mapper: debug  # 将你的 Mapper 包路径设为 debug 级别
+
+logging:
+  level:
+    root: INFO  # 全局日志级别
+    com.com.obee.mybatis.service: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"  # 控制台输出格式

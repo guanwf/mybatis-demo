@@ -7,6 +7,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import com.obee.mybatis.service.DynamicInjectorService;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -50,4 +51,27 @@ public class DynamicInjectorTest {
 
         dynamicInjectorService.insert(goods);
     }
+
+    public void testBatchPerformance() {
+        List<Goods> userList = new ArrayList<>();
+
+        // 构造 5000 条数据
+        for (int i = 0; i < 5000; i++) {
+            Goods user = new Goods();
+            user.setStatus(i);
+            user.setAge(i % 100);
+            userList.add(user);
+        }
+
+        long start = System.currentTimeMillis();
+
+        // 执行批量插入
+        int rows = dynamicInjectorService.insertBatch(userList);
+
+        long end = System.currentTimeMillis();
+
+        System.out.println("成功插入: " + rows + " 行");
+        System.out.println("耗时: " + (end - start) + " ms");
+    }
+
 }

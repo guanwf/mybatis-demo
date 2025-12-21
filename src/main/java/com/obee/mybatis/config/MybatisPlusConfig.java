@@ -6,7 +6,7 @@ import com.baomidou.mybatisplus.core.metadata.TableInfo;
 import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.handler.TenantLineHandler;
 import com.baomidou.mybatisplus.extension.plugins.inner.TenantLineInnerInterceptor;
-import com.obee.mybatis.support.SelectSqlList;
+import com.obee.mybatis.support.SelectSqlListMethod;
 import net.sf.jsqlparser.expression.LongValue;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -29,7 +29,7 @@ public class MybatisPlusConfig {
                 // 获取父类原有方法（BaseMapper 中的方法）
                 List<AbstractMethod> methodList = super.getMethodList(mapperClass, tableInfo);
                 // 添加我们的自定义方法
-                methodList.add(new SelectSqlList());
+                methodList.add(new SelectSqlListMethod());
                 return methodList;
             }
         };

@@ -2,7 +2,7 @@ package com.obee.mybatis.service;
 
 import com.baomidou.mybatisplus.core.metadata.TableInfo;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
-import com.obee.mybatis.support.SelectSqlList;
+import com.obee.mybatis.support.SelectSqlListMethod;
 import org.mybatis.spring.SqlSessionTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.Assert;
@@ -44,7 +44,7 @@ public class DynamicQueryService {
 
         // 3. 构建 MappedStatement ID
         // 格式：com.example.mapper.UserMapper.selectSqlList
-        String statementId = tableInfo.getCurrentNamespace() + "." + SelectSqlList.METHOD_NAME;
+        String statementId = tableInfo.getCurrentNamespace() + "." + SelectSqlListMethod.METHOD_NAME;
 
         // 4. 执行底层查询
         // MyBatis 会自动将 map 中的其他 key (如 #{name}) 匹配到 SQL 中
