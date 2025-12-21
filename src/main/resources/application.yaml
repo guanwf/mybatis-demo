@@ -13,9 +13,9 @@ spring:
 
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://${bas.datasource.host}:${bas.datasource.port}/facdb?useUnicode=true&characterEncoding=utf8&autoReconnect=true&allowMultiQueries=true&serverTimezone=Asia/Shanghai
-    username: ${bas.datasource.username}
-    password: ${bas.datasource.password}
+    url: jdbc:mysql://127.0.0.1:3306/facdb?useUnicode=true&characterEncoding=utf8&autoReconnect=true&allowMultiQueries=true&serverTimezone=Asia/Shanghai
+    username: root
+    password: 123456
 
 # 方式一：输出到控制台 (简单直接)
 mybatis-plus:
