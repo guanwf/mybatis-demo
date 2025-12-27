@@ -47,14 +47,14 @@ VALUES
         // 1. 生成列名脚本: (id, name, age)
         // getAllInsertSqlColumnMaybeIf: 会自动生成 <if test="name != null">name,</if> 逻辑
         String columnScript = SqlScriptUtils.convertTrim(
-                tableInfo.getKeyInsertSqlColumn(true, "", false) +
+                //tableInfo.getKeyInsertSqlColumn(true, "", false) +
                         tableInfo.getAllInsertSqlColumnMaybeIf(null),
                 "(", ")", null, ","
         );
 
         // 2. 生成值脚本: (#{id}, #{name}, #{age})
         String valuesScript = SqlScriptUtils.convertTrim(
-                tableInfo.getKeyInsertSqlProperty(true, "", false) +
+                //tableInfo.getKeyInsertSqlProperty(true, "", false) +
                         tableInfo.getAllInsertSqlPropertyMaybeIf(null),
                 "(", ")", null, ","
         );

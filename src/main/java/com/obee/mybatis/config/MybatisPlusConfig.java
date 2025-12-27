@@ -21,7 +21,7 @@ import java.util.List;
 @Configuration
 public class MybatisPlusConfig {
 
-    @Bean
+//    @Bean
     public DefaultSqlInjector sqlInjector() {
         return new DefaultSqlInjector() {
             @Override
@@ -35,7 +35,7 @@ public class MybatisPlusConfig {
         };
     }
 
-    @Bean
+//    @Bean
     public MybatisPlusInterceptor mybatisPlusInterceptor() {
         MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
 

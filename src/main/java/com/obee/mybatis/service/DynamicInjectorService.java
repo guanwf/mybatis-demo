@@ -2,9 +2,9 @@ package com.obee.mybatis.service;
 
 import com.baomidou.mybatisplus.core.metadata.TableInfo;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
-import com.obee.mybatis.support.InsertBatchEntity;
-import com.obee.mybatis.support.InsertMethod;
-import com.obee.mybatis.support.SelectSqlListMethod;
+import com.obee.mybatis.model.GlobalDummy;
+import com.obee.mybatis.support.*;
+import com.obee.mybatis.utils.SqlSafeUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.apache.ibatis.session.Configuration;
@@ -19,7 +19,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+
 import org.apache.ibatis.session.SqlSession;
+
+import org.apache.ibatis.reflection.MetaObject;
+import org.apache.ibatis.reflection.SystemMetaObject;
 
 /**
  * @description:
@@ -39,9 +43,126 @@ public class DynamicInjectorService {
     // 建议分片大小：500-1000
     private static final int BATCH_SIZE = 1000;
 
-    public DynamicInjectorService(SqlSessionTemplate sqlSessionTemplate,SqlSessionFactory  sqlSessionFactory) {
+    // 标记全局方法是否已注册
+    private volatile boolean isGlobalInjected = false;
+
+    public DynamicInjectorService(SqlSessionTemplate sqlSessionTemplate, SqlSessionFactory sqlSessionFactory) {
         this.sqlSessionTemplate = sqlSessionTemplate;
-        this.sqlSessionFactory=sqlSessionFactory;
+        this.sqlSessionFactory = sqlSessionFactory;
+    }
+
+    // =========================================================
+    // 1. 根据 ID 查询 (返回单条)
+    // =========================================================
+    public <T> T selectById(Class<T> entityClass, Object id) {
+        Assert.notNull(entityClass, "实体类型不能为空");
+        Assert.notNull(id, "ID不能为空");
+
+        injectIfNeed(entityClass);
+
+        String statementId = entityClass.getName() + "." + SelectByIdEntity.METHOD_NAME;
+        log.debug("[Select]ById:Entity={},ID={}", entityClass.getSimpleName(), id);
+
+        return sqlSessionTemplate.selectOne(statementId, id);
+    }
+
+    // =========================================================
+    // 2. 根据 Map 条件查询 (List)
+    // =========================================================
+    public <T> List<T> selectList(Class<T> entityClass, Map<String, Object> params) {
+        return executeSelectByMap(entityClass, params);
+    }
+
+    // 3. 根据 Map 条件查询 (One)
+    public <T> T selectOne(Class<T> entityClass, Map<String, Object> params) {
+        List<T> list = executeSelectByMap(entityClass, params);
+        return handleSelectOne(list);
+    }
+
+    private <T> List<T> executeSelectByMap(Class<T> entityClass, Map<String, Object> params) {
+        Assert.notNull(entityClass, "实体类型不能为空");
+        injectIfNeed(entityClass);
+
+        Map<String, Object> context = new HashMap<>();
+        context.put("params", params); // 对应 collection="params"
+
+        String statementId = entityClass.getName() + "." + SelectByMapEntity.METHOD_NAME;
+        log.debug("[Select]ByMap:Entity={},Params={}", entityClass.getSimpleName(), params);
+
+        return sqlSessionTemplate.selectList(statementId, context);
+    }
+
+    // =========================================================
+    // 4. 根据 WhereSql 自定义条件查询 (List)
+    // =========================================================
+    public <T> List<T> selectList(Class<T> entityClass, String whereSql) {
+        return executeSelectByWhereSql(entityClass, whereSql);
+    }
+
+    // 5. 根据 WhereSql 自定义条件查询 (One)
+    public <T> T selectOne(Class<T> entityClass, String whereSql) {
+        List<T> list = executeSelectByWhereSql(entityClass, whereSql);
+        return handleSelectOne(list);
+    }
+
+    private <T> List<T> executeSelectByWhereSql(Class<T> entityClass, String whereSql) {
+        Assert.notNull(entityClass, "实体类型不能为空");
+        // 安全检查
+        SqlSafeUtil.checkWhereClause(whereSql);
+
+        injectIfNeed(entityClass);
+
+        Map<String, Object> context = new HashMap<>();
+        context.put("whereSql", whereSql);
+
+        String statementId = entityClass.getName() + "." + SelectByWhereSqlEntity.METHOD_NAME;
+        log.debug("[Select] ByWhereSql: Entity={}, Where={}", entityClass.getSimpleName(), whereSql);
+
+        return sqlSessionTemplate.selectList(statementId, context);
+    }
+
+    // =========================================================
+    // 6. 根据 原生 SQL 查询 (List)
+    // =========================================================
+    public <T> List<T> selectListBySql(Class<T> entityClass, String sql, Map<String, Object> params) {
+        return executeSelectBySql(entityClass, sql, params);
+    }
+
+    // 7. 根据 原生 SQL 查询 (One)
+    public <T> T selectOneBySql(Class<T> entityClass, String sql, Map<String, Object> params) {
+        List<T> list = executeSelectBySql(entityClass, sql, params);
+        return handleSelectOne(list);
+    }
+
+    private <T> List<T> executeSelectBySql(Class<T> entityClass, String sql, Map<String, Object> params) {
+        Assert.notNull(entityClass, "实体类型不能为空");
+        // 安全检查
+        SqlSafeUtil.checkSelectSql(sql);
+
+        injectIfNeed(entityClass);
+
+        Map<String, Object> context = params == null ? new HashMap<>() : new HashMap<>(params);
+        context.put("sql", sql);
+
+        String statementId = entityClass.getName() + "." + SelectBySqlEntity.METHOD_NAME;
+        log.debug("[Select]BySql:Entity={},SQL={}", entityClass.getSimpleName(), sql);
+
+        return sqlSessionTemplate.selectList(statementId, context);
+    }
+
+
+    // =========================================================
+    // 辅助: 处理单条记录返回
+    // =========================================================
+    private <T> T handleSelectOne(List<T> list) {
+        if (list == null || list.isEmpty()) {
+            return null;
+        }
+        if (list.size() > 1) {
+            log.warn("selectOne查询到了多条数据，仅返回第一条.Size={}", list.size());
+            // 或者抛出异常: throw new TooManyResultsException("Expected one result (or null) to be returned by selectOne(), but found: " + list.size());
+        }
+        return list.get(0);
     }
 
     /**
@@ -156,6 +277,65 @@ public class DynamicInjectorService {
                 new InsertBatchEntity().inject(assistant, entityClass, entityClass, tableInfo);
             }
 
+            // 3. 注入 UpdateBySql (直接SQL) <-- 新增
+            if (!configuration.hasStatement(namespace + "." + UpdateBySql.METHOD_NAME)) {
+                new UpdateBySql().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+
+            // 4. 注入 UpdateWithWhereEntity (Bean更新) <-- 新增
+            if (!configuration.hasStatement(namespace + "." + UpdateWithWhereEntity.METHOD_NAME)) {
+                // 注意：如果没有主键，这个方法内部会返回 null，不会注册成功，要容错
+                try {
+                    new UpdateWithWhereEntity().inject(assistant, entityClass, entityClass, tableInfo);
+                } catch (Exception e) {
+                    log.warn("UpdateEntity 注入失败 (可能缺少主键): {}", entityClass.getName());
+                }
+            }
+
+            if (!configuration.hasStatement(namespace + "." + UpdateByIdEntity.METHOD_NAME)) {
+                try {
+                    new UpdateByIdEntity().inject(assistant, entityClass, entityClass, tableInfo);
+                } catch (Exception e) {
+                    log.warn("UpdateEntity 注入失败 (可能缺少主键): {}", entityClass.getName());
+                }
+            }
+
+            // 注入 UpdateWithWhereSqlEntity <--- 新增
+            if (!configuration.hasStatement(namespace + "." + UpdateWithWhereSqlEntity.METHOD_NAME)) {
+                new UpdateWithWhereSqlEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+
+            // 1. DeleteByIdEntity
+            if (!configuration.hasStatement(namespace + "." + DeleteByIdEntity.METHOD_NAME)) {
+                new DeleteByIdEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+            // 2. DeleteWithWhereEntity
+            if (!configuration.hasStatement(namespace + "." + DeleteWithWhereEntity.METHOD_NAME)) {
+                new DeleteWithWhereEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+            // 3. DeleteWithWhereSqlEntity
+            if (!configuration.hasStatement(namespace + "." + DeleteWithWhereSqlEntity.METHOD_NAME)) {
+                new DeleteWithWhereSqlEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+
+
+            // 1. SelectByIdEntity
+            if (!configuration.hasStatement(namespace + "." + SelectByIdEntity.METHOD_NAME)) {
+                new SelectByIdEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+            // 2. SelectByMapEntity
+            if (!configuration.hasStatement(namespace + "." + SelectByMapEntity.METHOD_NAME)) {
+                new SelectByMapEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+            // 3. SelectByWhereSqlEntity
+            if (!configuration.hasStatement(namespace + "." + SelectByWhereSqlEntity.METHOD_NAME)) {
+                new SelectByWhereSqlEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+            // 4. SelectBySqlEntity
+            if (!configuration.hasStatement(namespace + "." + SelectBySqlEntity.METHOD_NAME)) {
+                new SelectBySqlEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+
             injectedCache.put(entityClass, true);
         }
     }
@@ -180,6 +360,44 @@ public class DynamicInjectorService {
         return sqlSessionTemplate.insert(statementId, entity);
     }
 
+    @Transactional(rollbackFor = Exception.class)
+    public int insertBySql(String sql) {
+        // 安全检查
+        SqlSafeUtil.checkInsertSql(sql);
+
+        injectGlobalMapperIfNeed();
+
+        Map<String, Object> map = new HashMap<>();
+        map.put("sql", sql);
+
+        log.info("[Insert]原生SQL插入:SQL={}", sql, map);
+
+        String statementId = GlobalDummy.class.getName() + "." + InsertBySql.METHOD_NAME;
+        return sqlSessionTemplate.insert(statementId, map);
+    }
+
+    /**
+     * 根据参数值
+     *
+     * @param sql
+     * @param params
+     * @return
+     */
+    public int insertBySql(String sql, Map<String, Object> params) {
+        // 安全检查
+        SqlSafeUtil.checkInsertSql(sql);
+
+        injectGlobalMapperIfNeed();
+
+        Map<String, Object> map = params == null ? new HashMap<>() : new HashMap<>(params);
+        map.put("sql", sql);
+
+        log.info("[Insert]原生SQL插入:SQL={},Params={}", sql, params);
+
+        String statementId = GlobalDummy.class.getName() + "." + InsertBySql.METHOD_NAME;
+        return sqlSessionTemplate.insert(statementId, map);
+    }
+
     /**
      * 批量插入 (带分片处理，性能最优)
      *
@@ -187,7 +405,7 @@ public class DynamicInjectorService {
      * @return 成功插入的总条数
      */
     @Transactional(rollbackFor = Exception.class) // 开启事务，保证要么全成，要么全败
-    public <T> int insertBatch(List<T> entityList) {
+    public <T> int insert(List<T> entityList) {
         if (entityList == null || entityList.isEmpty()) {
             return 0;
         }
@@ -212,7 +430,7 @@ public class DynamicInjectorService {
             // SqlSessionTemplate.insert 默认如果传 List，会自动把参数名设为 "list"
             totalRows += sqlSessionTemplate.insert(statementId, subList);
 
-//            log.debug("Batch insert progress: {}/{}", end, size);
+            log.debug("Batch insert progress: {}/{}", end, size);
         }
 
         return totalRows;
@@ -221,7 +439,7 @@ public class DynamicInjectorService {
     /**
      * JDBC 原生批量插入 (Oracle/全数据库兼容, 高性能)
      * 原理: 开启 ExecutorType.BATCH，复用预编译语句
-     *
+     * <p>
      * INSERT INTO sys_user (id, name) VALUES (?, ?)。
      *
      * @param entityList 实体列表
@@ -269,5 +487,322 @@ public class DynamicInjectorService {
         }
     }
 
+    /**
+     * 执行原生 Update/Delete SQL
+     *
+     * @param sqlTemplate SQL 语句 (支持 #{param})
+     * @param params      参数
+     * @param entityClass 任意实体类 (用于挂载 Mapper)
+     * @return 影响行数
+     */
+//    @Transactional(rollbackFor = Exception.class)
+//    public int updateBySql(String sqlTemplate, Map<String, Object> params, Class<?> entityClass) {
+//        injectIfNeed(entityClass);
+//
+//        Map<String, Object> map = params == null ? new HashMap<>() : new HashMap<>(params);
+//        map.put("sql", sqlTemplate);
+//
+//        String statementId = entityClass.getName() + "." + UpdateBySql.METHOD_NAME;
+//        return sqlSessionTemplate.update(statementId, map);
+//    }
+
+    /**
+     * 根据 ID 更新实体 (只更新非空字段)
+     *
+     * @param entity 实体对象 (必须包含主键值)
+     * @return 影响行数
+     */
+//    @Transactional(rollbackFor = Exception.class)
+//    public <T> int updateById(T entity) {
+//        Assert.notNull(entity, "Entity cannot be null");
+//        Class<?> entityClass = entity.getClass();
+//
+//        injectIfNeed(entityClass);
+//
+//        String statementId = entityClass.getName() + "." + UpdateEntity.METHOD_NAME;
+//
+//        // MyBatis 会自动提取 entity 中的主键作为 WHERE 条件
+//        // 提取 entity 中的非空字段作为 SET 内容
+//
+//        return sqlSessionTemplate.update(statementId, entity);
+//    }
+
+    /**
+     * 自定义条件更新
+     *
+     * @param entity 用于生成 SET 语句 (非空字段会被更新)
+     * @param params 用于生成 WHERE 语句 (key为列名, value为值)
+     * @return 影响行数
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public <T> int update(T entity, Map<String, Object> params) {
+        Assert.notNull(entity, "更新实体 entity 不能为空");
+        Class<?> entityClass = entity.getClass();
+
+        // 1. 安全检查: 禁止无条件更新 (防止全表更新事故)
+        if (params == null || params.isEmpty()) {
+            throw new IllegalArgumentException("必须指定params更新条件，禁止全表更新！");
+        }
+
+        // 2. 确保已注入
+        injectIfNeed(entityClass);
+
+        // 3. 构造参数上下文
+        // 因为 Mapper 接收到了两个对象，我们需要把它们包起来
+        Map<String, Object> context = new HashMap<>();
+        context.put("et", entity);    // 对应 AbstractMethod 里的 "et"
+        context.put("params", params); // 对应 AbstractMethod 里的 collection="params"
+
+        String statementId = entityClass.getName() + "." + UpdateWithWhereEntity.METHOD_NAME;
+
+        // 4. 执行更新
+        return sqlSessionTemplate.update(statementId, context);
+    }
+
+    /**
+     * 注入全局通用的 MappedStatement
+     */
+    private void injectGlobalMapperIfNeed() {
+        if (isGlobalInjected) return;
+
+        synchronized (this) {
+            if (isGlobalInjected) return;
+
+            Class<?> entityClass = GlobalDummy.class;
+            String namespace = entityClass.getName();
+            Configuration configuration = sqlSessionTemplate.getConfiguration();
+
+            // 只有当容器里没有这个方法时才注入
+            if (!configuration.hasStatement(namespace + "." + UpdateBySql.METHOD_NAME)) {
+                log.info(">>>>>> 初始化全局 SQL 执行器: {}", namespace);
+
+                MapperBuilderAssistant assistant = new MapperBuilderAssistant(configuration, namespace.replace('.', '/') + ".java (Global)");
+                assistant.setCurrentNamespace(namespace);
+
+                // UpdateBySql 不需要 TableInfo (因为它直接执行 ${sql})，所以 TableInfo 传 null 即可
+                // 如果你的 UpdateBySql 实现里用到了 tableInfo (比如 getTableName)，这里就需要想办法
+                // 但根据上一轮的 UpdateBySql 实现，它只用了 ${sql}，所以传 null 是安全的
+                new UpdateBySql().inject(assistant, entityClass, entityClass, null);
+            }
+
+            if (!configuration.hasStatement(namespace + "." + DeleteBySql.METHOD_NAME)) {
+                MapperBuilderAssistant assistant = new MapperBuilderAssistant(configuration, namespace.replace('.', '/') + ".java (Global)");
+                assistant.setCurrentNamespace(namespace);
+                new DeleteBySql().inject(assistant, entityClass, entityClass, null);
+            }
+
+            if (!configuration.hasStatement(namespace + "." + InsertBySql.METHOD_NAME)) {
+                MapperBuilderAssistant assistant = new MapperBuilderAssistant(configuration, namespace.replace('.', '/') + ".java (Global)");
+                assistant.setCurrentNamespace(namespace);
+                new InsertBySql().inject(assistant, entityClass, entityClass, null);
+            }
+
+
+            isGlobalInjected = true;
+        }
+    }
+
+    /**
+     * 优化的直接 SQL 更新方法
+     * 1. 无需传入 Class
+     * 2. 增加 SQL 安全检查
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public int updateBySql(String sqlTemplate, Map<String, Object> params) {
+        // 1. 安全检查
+        SqlSafeUtil.checkSql(sqlTemplate);
+
+        // 2. 确保全局 Mapper 已注入 (只执行一次)
+        injectGlobalMapperIfNeed();
+
+        // 3. 准备参数
+        Map<String, Object> map = params == null ? new HashMap<>() : new HashMap<>(params);
+        map.put("sql", sqlTemplate);
+
+        // 4. 使用全局 ID 执行
+        String statementId = GlobalDummy.class.getName() + "." + UpdateBySql.METHOD_NAME;
+        return sqlSessionTemplate.update(statementId, map);
+    }
+
+    /**
+     * 根据 ID 更新实体 (严格模式)
+     * 1. 检查实体是否有 @TableId 注解
+     * 2. 检查实体 ID 值是否为 null
+     * 3. 只更新非空字段
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public int updateById(Object entity) {
+        Assert.notNull(entity, "更新对象不能为空");
+        Class<?> entityClass = entity.getClass();
+
+        // 1. 确保已注入
+        injectIfNeed(entityClass);
+
+        // 2. 获取元数据进行检查
+        TableInfo tableInfo = TableInfoHelper.getTableInfo(entityClass);
+
+        // 校验 A: 检查是否定义了主键
+        if (tableInfo == null || !tableInfo.havePK()) {
+            throw new IllegalArgumentException("操作失败: 实体类 " + entityClass.getSimpleName() + " 未定义主键 (@TableId)");
+        }
+
+        // ------------------ 修改开始 ------------------
+        // 校验 B: 检查传入对象的 ID 值是否为空
+        // 使用 MyBatis 原生工具 SystemMetaObject 获取属性值，兼容性最好
+        MetaObject metaObject = SystemMetaObject.forObject(entity);
+        // tableInfo.getKeyProperty() 获取的是主键的属性名 (如 "userId")
+        // metaObject.getValue(...) 会自动调用 getUserId() 方法
+        Object idVal = metaObject.getValue(tableInfo.getKeyProperty());
+        // ------------------ 修改结束 ------------------
+
+        // 校验 B: 检查传入对象的 ID 值是否为空
+        // 利用 MP 的 ReflectionKit 反射获取主键值
+        //tableInfo.havePK(): 这是 MyBatis-Plus 解析后的元数据，判断类上有没有 @TableId。
+//        Object idVal = ReflectionKit.getMethodValue(entity, tableInfo.getKeyProperty());
+        if (idVal == null) {
+            throw new IllegalArgumentException("操作失败: 更新操作的主键值不能为 NULL (字段: " + tableInfo.getKeyProperty() + ")");
+        }
+
+        // 3. 执行更新
+        String statementId = entityClass.getName() + "." + UpdateByIdEntity.METHOD_NAME;
+
+        return sqlSessionTemplate.update(statementId, entity);
+    }
+
+
+    /**
+     * 自定义 SQL 条件更新
+     * @param entity 用于生成 SET 语句 (更新的内容)
+     * @param whereSql 自定义 WHERE 条件 (例如 "age > 10 AND status = 1")
+     * @return 影响行数
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public <T> int update(T entity, String whereSql) {
+        Assert.notNull(entity, "更新实体 entity 不能为空");
+        // 1. 安全检查: 禁止空条件 (防止全表更新)
+        if (whereSql == null || whereSql.trim().isEmpty()) {
+            throw new IllegalArgumentException("必须指定 whereSql 条件，禁止全表更新！");
+        }
+
+        // 简单防注入/防误操作检查 (根据需求可选)
+        // 这里的校验逻辑比较简单，如果 whereSql 包含 ; 或者是 DROP 等关键字应该拦截
+        if (whereSql.contains(";") || whereSql.toUpperCase().contains("DROP ")) {
+            throw new IllegalArgumentException("检测到非法 SQL 关键字");
+        }
+
+        try {
+            SqlSafeUtil.checkWhereClauseStrict(whereSql);
+        } catch (IllegalArgumentException e) {
+            log.error("SQL 安全拦截: {}", e.getMessage());
+            throw e; // 抛出异常中断执行
+        }
+
+        Class<?> entityClass = entity.getClass();
+
+        // 2. 确保已注入
+        injectIfNeed(entityClass);
+
+        // 3. 构造参数上下文
+        Map<String, Object> context = new HashMap<>();
+        context.put("et", entity);        // 实体 -> SET 用
+        context.put("whereSql", whereSql); // 字符串 -> WHERE 用
+
+        String statementId = entityClass.getName() + "." + UpdateWithWhereSqlEntity.METHOD_NAME;
+
+        // 4. 执行更新
+        return sqlSessionTemplate.update(statementId, context);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public int deleteById(Object entity) {
+        Assert.notNull(entity, "删除对象不能为空");
+        Class<?> entityClass = entity.getClass();
+
+        injectIfNeed(entityClass);
+        TableInfo tableInfo = TableInfoHelper.getTableInfo(entityClass);
+
+        // 校验: 是否有主键注解
+        if (tableInfo == null || !tableInfo.havePK()) {
+            throw new IllegalArgumentException("操作失败:实体" + entityClass.getSimpleName() + "未定义主键(@TableId)");
+        }
+
+        // 校验: ID 值是否为空 (使用 SystemMetaObject)
+        MetaObject metaObject = SystemMetaObject.forObject(entity);
+        Object idVal = metaObject.getValue(tableInfo.getKeyProperty());
+        if (idVal == null) {
+            throw new IllegalArgumentException("操作失败:删除操作的主键值不能为NULL");
+        }
+
+        log.info("[Delete]根据ID删除:Entity={},ID={}", entityClass.getSimpleName(), idVal);
+
+        String statementId = entityClass.getName() + "." + DeleteByIdEntity.METHOD_NAME;
+        return sqlSessionTemplate.delete(statementId, entity); // 这里的 parameter 直接传 entity，MyBatis 会去取属性
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public int deleteBySql(String sql, Map<String, Object> params) {
+        // 安全检查
+        SqlSafeUtil.checkSql(2,sql); // 确保包含 DELETE 且有 WHERE
+
+        injectGlobalMapperIfNeed();
+
+        Map<String, Object> map = params == null ? new HashMap<>() : new HashMap<>(params);
+        map.put("sql", sql);
+
+        log.info("[Delete]原生SQL删除:SQL={},Params={}", sql, params);
+
+        String statementId = GlobalDummy.class.getName() + "." + DeleteBySql.METHOD_NAME;
+        return sqlSessionTemplate.delete(statementId, map);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public <T> int delete(Class<T> entityClass, Map<String, Object> params) {
+        Assert.notNull(entityClass, "实体类型不能为空");
+
+        // 全表防护
+        if (params == null || params.isEmpty()) {
+            throw new IllegalArgumentException("操作失败:必须提供params删除条件禁止全表删除！");
+        }
+
+        injectIfNeed(entityClass);
+
+        Map<String, Object> context = new HashMap<>();
+        context.put("params", params); // 对应 XML 中的 collection="params"
+
+        log.info("[Delete]Map条件删除:Entity={},Params={}", entityClass.getSimpleName(), params);
+
+        String statementId = entityClass.getName() + "." + DeleteWithWhereEntity.METHOD_NAME;
+        return sqlSessionTemplate.delete(statementId, context);
+    }
+
+    /**
+     *
+     * @param entityClass
+     * @param whereSql id=1111 and flag=0
+     * @return
+     * @param <T>
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public <T> int delete(Class<T> entityClass, String whereSql) {
+        Assert.notNull(entityClass, "实体类型不能为空");
+
+        // 安全检查 & 全表防护
+        try {
+            SqlSafeUtil.checkWhereClause(2,whereSql);
+        } catch (IllegalArgumentException e) {
+            log.error("SQL安全拦截:{}", e.getMessage());
+            throw e;
+        }
+
+        injectIfNeed(entityClass);
+
+        Map<String, Object> context = new HashMap<>();
+        context.put("whereSql", whereSql);
+
+        log.info("[Delete]String条件删除:Entity={},Where={}", entityClass.getSimpleName(), whereSql);
+
+        String statementId = entityClass.getName() + "." + DeleteWithWhereSqlEntity.METHOD_NAME;
+        return sqlSessionTemplate.delete(statementId, context);
+    }
 
 }
