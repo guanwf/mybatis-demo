@@ -45,6 +45,9 @@ public class SqlSafeUtil {
             "(?i)\\b(DROP|TRUNCATE|ALTER|GRANT|REVOKE|DELETE|UNION|SHUTDOWN|EXEC|Create|DESC)\\b"
     );
 
+    // 用于匹配 MyBatis 占位符 #{...} 和 ${...}
+    private static final Pattern MYBATIS_PLACEHOLDER = Pattern.compile("[#$]\\{[^}]+\\}");
+
     public static void checkSql(String sql) {
         checkSql(1, sql);
     }
@@ -203,6 +206,25 @@ public class SqlSafeUtil {
         if (sql.contains(";")) {
             throw new IllegalArgumentException("SQL 语句不允许包含分号 (;)");
         }
+
+        // =========================================================
+        // 5. 【核心升级】使用 JSqlParser 进行严格语法检查
+        // =========================================================
+        try {
+            // A. 预处理：因为 SQL 包含 #{id} 这种非标准 SQL 语法，解析器不认识
+            // 我们将所有的 #{xxx} 或 ${xxx} 替换为 "?" (标准占位符) 或 "0" (数字字面量)
+            // 这样只检查 SQL 结构，不关心参数
+            String mockSql = MYBATIS_PLACEHOLDER.matcher(sql).replaceAll("?");
+
+            // B. 尝试解析
+            // 如果 SQL 写成了 "select * fromd demo"，这里会直接抛出 JSQLParserException
+            CCJSqlParserUtil.parse(mockSql);
+
+        } catch (JSQLParserException e) {
+            // 解析失败，说明语法有错
+            throw new IllegalArgumentException("SQL语法错误，请检查拼写:" + e.getCause().getMessage());
+        }
+
     }
 
 }

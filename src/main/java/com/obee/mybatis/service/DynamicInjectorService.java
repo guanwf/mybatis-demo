@@ -1,8 +1,14 @@
 package com.obee.mybatis.service;
 
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.core.metadata.TableFieldInfo;
 import com.baomidou.mybatisplus.core.metadata.TableInfo;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.obee.mybatis.model.GlobalDummy;
+import com.obee.mybatis.model.PageRequest;
+import com.obee.mybatis.model.PageResult;
 import com.obee.mybatis.support.*;
 import com.obee.mybatis.utils.SqlSafeUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -11,10 +17,12 @@ import org.apache.ibatis.session.Configuration;
 import org.apache.ibatis.session.ExecutorType;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.mybatis.spring.SqlSessionTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.Assert;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +41,10 @@ import org.apache.ibatis.reflection.SystemMetaObject;
 @Service
 @Slf4j
 public class DynamicInjectorService {
+
+    @Autowired
+    private ObjectMapper objectMapper; // 需注入 Jackson
+
     private final SqlSessionTemplate sqlSessionTemplate;
 
     private final SqlSessionFactory sqlSessionFactory; // <--- 新增注入
@@ -105,6 +117,19 @@ public class DynamicInjectorService {
         return handleSelectOne(list);
     }
 
+    /**
+     * 单条+纯SQL
+     *
+     * @param mySQL
+     * @param params
+     * @param <T>
+     * @return
+     */
+    public <T> T selectOneSQL(Class<T> entityClass, String mySQL, Map<String, Object> params) {
+        List<T> list = executeSelectBySql(entityClass, mySQL, params);
+        return handleSelectOne(list);
+    }
+
     private <T> List<T> executeSelectByWhereSql(Class<T> entityClass, String whereSql) {
         Assert.notNull(entityClass, "实体类型不能为空");
         // 安全检查
@@ -128,12 +153,102 @@ public class DynamicInjectorService {
         return executeSelectBySql(entityClass, sql, params);
     }
 
+    public <T> List<Map> selectListBySql(String sql, Map<String, Object> params) {
+        return executeSelectBySql(sql, params);
+    }
+
+
     // 7. 根据 原生 SQL 查询 (One)
     public <T> T selectOneBySql(Class<T> entityClass, String sql, Map<String, Object> params) {
         List<T> list = executeSelectBySql(entityClass, sql, params);
         return handleSelectOne(list);
     }
 
+    public Map selectOneSQL(String sql, Map<String, Object> params) {
+        List<Map> list = executeSelectBySql(sql, params);
+        return handleSelectOne(list);
+    }
+
+    /**
+     * 根据sql查询结果转换成targetClass的类
+     * @param targetClass
+     * @param mySQL
+     * @param params
+     * @return
+     * @param <T>
+     */
+    public <T> T selectOneBySqlWithConvert(Class<T> targetClass, String mySQL, Map<String, Object> params) {
+        // 1. 调用全局 Map 查询 (SelectPageBySqlGlobal 或类似的全局方法)
+        // 这里假设你有一个返回 List<Map> 的底层方法
+        List<Map<String, Object>> mapList = executeSelectBySql(mySQL, params);
+
+        Map<String, Object> resultMap = handleSelectOne(mapList);
+        if (resultMap == null) {
+            return null;
+        }
+
+        // 2. 手动转换: Map -> Bean
+        return objectMapper.convertValue(resultMap, targetClass);
+    }
+
+    /**
+     * 根据sql查询结果转换成targetClass的类
+     * 先查 Map，再转 Bean
+     *
+     * @param targetClass
+     * @param mySQL
+     * @param params
+     * @param <T>
+     * @return
+     */
+    public <T> List<T> selectListBySqlWithConvert(Class<T> targetClass, String mySQL, Map<String, Object> params) {
+
+        // 1. 调用全局 Map 查询 (SelectPageBySqlGlobal 或类似的全局方法)
+        // 这里假设你有一个返回 List<Map> 的底层方法
+        List<Map<String, Object>> mapList = executeSelectBySql(mySQL, params);
+
+        Map<String, Object> resultMap = handleSelectOne(mapList);
+        if (resultMap == null) {
+            return null;
+        }
+
+        // 2. 手动转换: Map -> Bean
+//        return objectMapper.convertValue(resultMap, targetClass);
+        return convertMapListToBeanList(mapList, targetClass);
+    }
+
+    /**
+     * 辅助方法：List<Map> -> List<Bean>
+     */
+    private <T> List<T> convertMapListToBeanList(List<Map<String, Object>> rawList, Class<T> clazz) {
+        if (rawList == null || rawList.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        List<T> resultList = new ArrayList<>(rawList.size());
+        for (Map<String, Object> map : rawList) {
+            try {
+                // 利用 Jackson 的 convertValue 强转
+                // 它能自动处理 int -> Long, String -> Date 等类型转换
+                T bean = objectMapper.convertValue(map, clazz);
+                resultList.add(bean);
+            } catch (Exception e) {
+                log.error("Map 转 Bean 失败: {}", e.getMessage());
+                throw new RuntimeException("数据转换异常", e);
+            }
+        }
+        return resultList;
+    }
+
+    /**
+     * Bean+SQL
+     *
+     * @param entityClass
+     * @param sql
+     * @param params
+     * @param <T>
+     * @return
+     */
     private <T> List<T> executeSelectBySql(Class<T> entityClass, String sql, Map<String, Object> params) {
         Assert.notNull(entityClass, "实体类型不能为空");
         // 安全检查
@@ -150,6 +265,28 @@ public class DynamicInjectorService {
         return sqlSessionTemplate.selectList(statementId, context);
     }
 
+
+    /**
+     * 纯SQL
+     *
+     * @param sql
+     * @param params
+     * @param <T>
+     * @return
+     */
+    private <T> List<T> executeSelectBySql(String sql, Map<String, Object> params) {
+        // 安全检查
+        SqlSafeUtil.checkSelectSql(sql);
+
+        injectGlobalMapperIfNeed();
+
+        Map<String, Object> context = params == null ? new HashMap<>() : new HashMap<>(params);
+        context.put("sql", sql);
+
+        String statementId = GlobalDummy.class.getName() + "." + SelectBySql.METHOD_NAME;
+
+        return sqlSessionTemplate.selectList(statementId, context);
+    }
 
     // =========================================================
     // 辅助: 处理单条记录返回
@@ -184,6 +321,128 @@ public class DynamicInjectorService {
         // 4. 执行查询
         // 此时 MyBatis 里已经有了这个 ID，且 ResultMap 已经指向了 entityClass
         return sqlSessionTemplate.selectList(statementId, map);
+    }
+
+
+    /**
+     * 分页查询 - 完全通过 SQL
+     *
+     * @param entityClass
+     * @param req
+     * @param sql
+     * @param params
+     * @param <T>
+     * @return
+     */
+    public <T> PageResult<T> selectPageBySql(Class<T> entityClass, PageRequest req, String sql, Map<String, Object> params) {
+        Assert.notNull(entityClass, "实体类型不能为空");
+
+        SqlSafeUtil.checkSelectSql(sql);
+
+        injectIfNeed(entityClass);
+
+        // 1. 转换入参
+        IPage<T> mpPage = toMpPage(req);
+
+        // 2. 构造 Context
+        Map<String, Object> context = params == null ? new HashMap<>() : new HashMap<>(params);
+        context.put("sql", sql);
+        context.put("page", mpPage); // MP 插件识别点
+
+        // 3. 执行
+        String statementId = entityClass.getName() + "." + SelectBySqlEntity.METHOD_NAME;
+        List<T> list = sqlSessionTemplate.selectList(statementId, context);
+
+        mpPage.setRecords(list);
+
+        // 4. 转换出参
+        return toPageResult(mpPage);
+    }
+
+    public <T> PageResult<T> selectPageBySql(String sql, PageRequest req) {
+        return this.selectPageBySql(sql, req, null);
+    }
+
+    public <T> PageResult<T> selectPageBySql(String sql, PageRequest req, Map<String, Object> params) {
+
+        SqlSafeUtil.checkSelectSql(sql);
+
+        injectGlobalMapperIfNeed();
+
+        // 1. 转换入参
+        IPage<T> mpPage = toMpPage(req);
+
+        // 2. 构造 Context
+        Map<String, Object> context = params == null ? new HashMap<>() : new HashMap<>(params);
+        context.put("sql", sql);
+        context.put("page", mpPage); // MP 插件识别点
+
+        // 3. 执行
+        String statementId = GlobalDummy.class.getName() + "." + SelectBySql.METHOD_NAME;
+        List<T> list = sqlSessionTemplate.selectList(statementId, context);
+
+        mpPage.setRecords(list);
+
+        // 4. 转换出参
+        return toPageResult(mpPage);
+    }
+
+    private <T> PageResult<T> executeSelectPageByMap(Class<T> entityClass, PageRequest req, Map<String, Object> params) {
+        // 1. 转换入参 (PageRequest -> MP Page)
+        IPage<T> mpPage = toMpPage(req);
+
+        // 2. 构造 Context
+        Map<String, Object> context = new HashMap<>();
+        if (params != null && !params.isEmpty()) {
+            context.put("params", params); // 对应 XML collection="params"
+        }
+        context.put("page", mpPage); // MP 插件识别点
+
+        // 3. 执行
+        String statementId = entityClass.getName() + "." + SelectByMapEntity.METHOD_NAME;
+        List<T> list = sqlSessionTemplate.selectList(statementId, context);
+
+        mpPage.setRecords(list);
+        // 4. 转换出参 (MP Page -> PageResult)
+        // MP 会自动把结果 list 塞回 mpPage 中，并计算 total
+        return toPageResult(mpPage);
+    }
+
+    /**
+     * 分页查询 - 通过 Map (Key为数据库列名)
+     *
+     * @param entityClass
+     * @param pageRequest
+     * @param params
+     * @param <T>
+     * @return
+     */
+    public <T> PageResult<T> selectPage(Class<T> entityClass, PageRequest pageRequest, Map<String, Object> params) {
+        Assert.notNull(entityClass, "实体类型不能为空");
+        injectIfNeed(entityClass);
+        return executeSelectPageByMap(entityClass, pageRequest, params);
+    }
+
+    /**
+     * 分页查询 - 通过 Bean (自动提取非空字段作为条件)
+     *
+     * @param entity
+     * @param pageRequest
+     * @param <T>
+     * @return
+     */
+    public <T> PageResult<T> selectPage(T entity, PageRequest pageRequest) {
+        Assert.notNull(entity, "查询实体不能为空");
+        Class<?> entityClass = entity.getClass();
+
+        // 1. 确保注入
+        injectIfNeed(entityClass);
+
+        // 2. 将 Bean 转为 Map<列名, 值>
+        Map<String, Object> columnMap = convertBeanToColumnMap(entity);
+
+        // 3. 复用 ByMap 的逻辑
+        return executeSelectPageByMap((Class<T>) entityClass, pageRequest, columnMap);
     }
 
     /**
@@ -597,6 +856,11 @@ public class DynamicInjectorService {
                 new InsertBySql().inject(assistant, entityClass, entityClass, null);
             }
 
+            if (!configuration.hasStatement(namespace + "." + SelectBySql.METHOD_NAME)) {
+                MapperBuilderAssistant assistant = new MapperBuilderAssistant(configuration, namespace.replace('.', '/') + ".java (Global)");
+                assistant.setCurrentNamespace(namespace);
+                new SelectBySql().inject(assistant, entityClass, entityClass, null);
+            }
 
             isGlobalInjected = true;
         }
@@ -672,7 +936,8 @@ public class DynamicInjectorService {
 
     /**
      * 自定义 SQL 条件更新
-     * @param entity 用于生成 SET 语句 (更新的内容)
+     *
+     * @param entity   用于生成 SET 语句 (更新的内容)
      * @param whereSql 自定义 WHERE 条件 (例如 "age > 10 AND status = 1")
      * @return 影响行数
      */
@@ -742,7 +1007,7 @@ public class DynamicInjectorService {
     @Transactional(rollbackFor = Exception.class)
     public int deleteBySql(String sql, Map<String, Object> params) {
         // 安全检查
-        SqlSafeUtil.checkSql(2,sql); // 确保包含 DELETE 且有 WHERE
+        SqlSafeUtil.checkSql(2, sql); // 确保包含 DELETE 且有 WHERE
 
         injectGlobalMapperIfNeed();
 
@@ -776,11 +1041,10 @@ public class DynamicInjectorService {
     }
 
     /**
-     *
      * @param entityClass
-     * @param whereSql id=1111 and flag=0
-     * @return
+     * @param whereSql    id=1111 and flag=0
      * @param <T>
+     * @return
      */
     @Transactional(rollbackFor = Exception.class)
     public <T> int delete(Class<T> entityClass, String whereSql) {
@@ -788,7 +1052,7 @@ public class DynamicInjectorService {
 
         // 安全检查 & 全表防护
         try {
-            SqlSafeUtil.checkWhereClause(2,whereSql);
+            SqlSafeUtil.checkWhereClause(2, whereSql);
         } catch (IllegalArgumentException e) {
             log.error("SQL安全拦截:{}", e.getMessage());
             throw e;
@@ -803,6 +1067,56 @@ public class DynamicInjectorService {
 
         String statementId = entityClass.getName() + "." + DeleteWithWhereSqlEntity.METHOD_NAME;
         return sqlSessionTemplate.delete(statementId, context);
+    }
+
+
+    /**
+     * Bean -> Map<Column, Value>
+     * 只提取非空字段，且 Key 转换为数据库列名 (解决驼峰/下划线不一致问题)
+     */
+    private Map<String, Object> convertBeanToColumnMap(Object entity) {
+        Map<String, Object> map = new HashMap<>();
+        TableInfo tableInfo = TableInfoHelper.getTableInfo(entity.getClass());
+        MetaObject metaObject = SystemMetaObject.forObject(entity);
+
+        // 1. 处理普通字段
+        for (TableFieldInfo fieldInfo : tableInfo.getFieldList()) {
+            Object value = metaObject.getValue(fieldInfo.getProperty());
+            if (value != null) {
+                map.put(fieldInfo.getColumn(), value); // Key 使用数据库列名
+            }
+        }
+        // 2. 处理主键
+        if (tableInfo.havePK()) {
+            Object pkVal = metaObject.getValue(tableInfo.getKeyProperty());
+            if (pkVal != null) {
+                map.put(tableInfo.getKeyColumn(), pkVal);
+            }
+        }
+        return map;
+    }
+
+    /**
+     * 入参转换: Custom Request -> MP Page
+     */
+    private <T> IPage<T> toMpPage(PageRequest req) {
+        if (req == null) {
+            return new Page<>(1, 10);
+        }
+        return new Page<>(req.getCurrent(), req.getSize());
+    }
+
+    /**
+     * 出参转换: MP Page -> Custom Result
+     */
+    private <T> PageResult<T> toPageResult(IPage<T> mpPage) {
+        return new PageResult<>(
+                mpPage.getRecords(),
+                mpPage.getTotal(),
+                mpPage.getCurrent(),
+                mpPage.getSize(),
+                mpPage.getPages()
+        );
     }
 
 }

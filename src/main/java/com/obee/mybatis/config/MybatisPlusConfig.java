@@ -1,10 +1,12 @@
 package com.obee.mybatis.config;
 
+import com.baomidou.mybatisplus.annotation.DbType;
 import com.baomidou.mybatisplus.core.injector.DefaultSqlInjector;
 import com.baomidou.mybatisplus.core.injector.AbstractMethod;
 import com.baomidou.mybatisplus.core.metadata.TableInfo;
 import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.handler.TenantLineHandler;
+import com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.inner.TenantLineInnerInterceptor;
 import com.obee.mybatis.support.SelectSqlListMethod;
 import net.sf.jsqlparser.expression.LongValue;
@@ -21,6 +23,16 @@ import java.util.List;
 @Configuration
 public class MybatisPlusConfig {
 
+    @Bean
+    public MybatisPlusInterceptor mybatisPlusPageInterceptor() {
+        MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
+        // 添加分页插件
+        // DbType.MYSQL 根据你的数据库选择，或者选 DbType.OCEAN_BASE
+        interceptor.addInnerInterceptor(new PaginationInnerInterceptor(DbType.MYSQL));
+//        interceptor.addInnerInterceptor(new PaginationInnerInterceptor(DbType.ORACLE));
+        return interceptor;
+    }
+
 //    @Bean
     public DefaultSqlInjector sqlInjector() {
         return new DefaultSqlInjector() {
@@ -36,7 +48,7 @@ public class MybatisPlusConfig {
     }
 
 //    @Bean
-    public MybatisPlusInterceptor mybatisPlusInterceptor() {
+    public MybatisPlusInterceptor mybatisPlusTenantInterceptor() {
         MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
 
         // 添加多租户插件
