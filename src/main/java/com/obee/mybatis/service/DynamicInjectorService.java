@@ -22,10 +22,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.Assert;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.ibatis.session.SqlSession;
@@ -171,11 +168,12 @@ public class DynamicInjectorService {
 
     /**
      * 根据sql查询结果转换成targetClass的类
+     *
      * @param targetClass
      * @param mySQL
      * @param params
-     * @return
      * @param <T>
+     * @return
      */
     public <T> T selectOneBySqlWithConvert(Class<T> targetClass, String mySQL, Map<String, Object> params) {
         // 1. 调用全局 Map 查询 (SelectPageBySqlGlobal 或类似的全局方法)
@@ -593,6 +591,21 @@ public class DynamicInjectorService {
             // 4. SelectBySqlEntity
             if (!configuration.hasStatement(namespace + "." + SelectBySqlEntity.METHOD_NAME)) {
                 new SelectBySqlEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+
+            //2026-01-31
+            // 1. 注入 UpdateByIdEntity (用于批量修改)
+            if (!configuration.hasStatement(namespace + "." + UpdateByIdEntity.METHOD_NAME)) {
+                new UpdateByIdEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+
+            // 2. 注入 DeleteBatchByIdsEntity (用于批量删除) <--- 新增
+            if (!configuration.hasStatement(namespace + "." + DeleteBatchByIdsEntity.METHOD_NAME)) {
+                new DeleteBatchByIdsEntity().inject(assistant, entityClass, entityClass, tableInfo);
+            }
+
+            if (!configuration.hasStatement(namespace + "." + UpdateWithWhereEntity.METHOD_NAME)) {
+                new UpdateWithWhereEntity().inject(assistant, entityClass, entityClass, tableInfo);
             }
 
             injectedCache.put(entityClass, true);
@@ -1117,6 +1130,215 @@ public class DynamicInjectorService {
                 mpPage.getSize(),
                 mpPage.getPages()
         );
+    }
+
+    // =========================================================
+    // 1. 批量删除 (通过 Entity 列表)
+    // =========================================================
+    @Transactional(rollbackFor = Exception.class)
+    public <T> int deleteBatchEntities(List<T> entityList) {
+        if (entityList == null || entityList.isEmpty()) return 0;
+
+        Class<?> entityClass = entityList.get(0).getClass();
+
+        injectIfNeed(entityClass);
+
+        // 1. 提取 ID 列表
+        List<Object> idList = new ArrayList<>();
+        TableInfo tableInfo = TableInfoHelper.getTableInfo(entityClass);
+        if (tableInfo == null || !tableInfo.havePK()) {
+            throw new IllegalArgumentException(entityClass.getSimpleName() + " 未定义主键，无法执行批量删除");
+        }
+        String keyProperty = tableInfo.getKeyProperty();
+
+        for (T entity : entityList) {
+            MetaObject metaObject = SystemMetaObject.forObject(entity);
+            Object idVal = metaObject.getValue(keyProperty);
+            if (idVal != null) {
+                idList.add(idVal);
+            }
+        }
+
+        if (idList.isEmpty()) {
+            return 0; // 如果没有有效的 ID，直接返回
+        }
+
+        // 2. 调用 ID 删除逻辑
+        return deleteBatchByIds(entityClass, idList);
+    }
+
+    // =========================================================
+    // 2. 批量删除 (通过 ID 列表)
+    // =========================================================
+    @Transactional(rollbackFor = Exception.class)
+    public <T> int deleteBatchByIds(Class<T> entityClass, Collection<?> idList) {
+        if (idList == null || idList.isEmpty()) return 0;
+        Assert.notNull(entityClass, "实体类型不能为空");
+
+        injectIfNeed(entityClass);
+
+        String statementId = entityClass.getName() + "." + DeleteBatchByIdsEntity.METHOD_NAME;
+        int total = 0;
+
+        // 3. 分片处理 (防止 IN (...) 里的参数超过数据库限制，如 Oracle 限制 1000 个)
+        List<Object> allIds = new ArrayList<>(idList);
+        int size = allIds.size();
+
+        for (int i = 0; i < size; i += BATCH_SIZE) {
+            int end = Math.min(i + BATCH_SIZE, size);
+            List<Object> subList = allIds.subList(i, end);
+
+            // 执行删除
+            total += sqlSessionTemplate.delete(statementId, subList);
+        }
+
+        return total;
+    }
+
+    // =========================================================
+    // 3. 批量修改 (JDBC Batch 模式 - 性能最高)
+    // =========================================================
+    @Transactional(rollbackFor = Exception.class)
+    public <T> void updateBatchById(List<T> entityList) {
+        if (entityList == null || entityList.isEmpty()) return;
+
+        Class<?> entityClass = entityList.get(0).getClass();
+        injectIfNeed(entityClass); // 确保 UpdateByIdEntity 已注入
+
+        // 复用单条更新的 Statement ID
+        String statementId = entityClass.getName() + "." + UpdateByIdEntity.METHOD_NAME;
+
+        // 开启 BATCH 模式的 Session
+        try (SqlSession batchSession = sqlSessionFactory.openSession(ExecutorType.BATCH, false)) {
+            int size = entityList.size();
+            for (int i = 0; i < size; i++) {
+                // 1. 发送更新命令 (不会立即执行，而是进入 Buffer)
+                batchSession.update(statementId, entityList.get(i));
+                //UPDATE demo SET name=?, remark=?, ... WHERE id=?
+                // 2. 分片刷新 (防止内存溢出)
+                if ((i + 1) % BATCH_SIZE == 0 || i == size - 1) {
+                    batchSession.flushStatements();
+                }
+            }
+            // 3. 提交事务
+            batchSession.commit();
+            batchSession.clearCache();
+        }
+    }
+
+    // =========================================================
+    // 4. 批量修改 - 根据指定字段 (非主键)
+    // 场景：List<User> list，我想根据 user_code 而不是 id 来批量更新
+    // =========================================================
+    @Transactional(rollbackFor = Exception.class)
+    public <T> void updateBatchByField(List<T> entityList, String fieldName) {
+        if (entityList == null || entityList.isEmpty()) return;
+
+        Class<?> entityClass = entityList.get(0).getClass();
+        injectIfNeed(entityClass); // 确保 UpdateWithWhereEntity 已注入
+
+        // 1. 获取元数据 (为了把属性名转为列名)
+        TableInfo tableInfo = TableInfoHelper.getTableInfo(entityClass);
+        String dbColumnName = null;
+
+        // 遍历查找该属性对应的数据库列名
+        for (TableFieldInfo fieldInfo : tableInfo.getFieldList()) {
+            if (fieldInfo.getProperty().equals(fieldName)) {
+                dbColumnName = fieldInfo.getColumn();
+                break;
+            }
+        }
+        // 也要检查主键
+        if (dbColumnName == null && tableInfo.havePK() && tableInfo.getKeyProperty().equals(fieldName)) {
+            dbColumnName = tableInfo.getKeyColumn();
+        }
+
+        if (dbColumnName == null) {
+            throw new IllegalArgumentException("在实体 " + entityClass.getSimpleName() + " 中找不到字段: " + fieldName);
+        }
+
+        // 2. 准备 Statement ID (复用 UpdateWithWhereEntity)
+        String statementId = entityClass.getName() + "." + UpdateWithWhereEntity.METHOD_NAME;
+
+        // 3. 开启 Batch Session
+        try (SqlSession batchSession = sqlSessionFactory.openSession(ExecutorType.BATCH, false)) {
+            int size = entityList.size();
+            for (int i = 0; i < size; i++) {
+                T entity = entityList.get(i);
+
+                // 4. 反射获取该字段的值
+                MetaObject metaObject = SystemMetaObject.forObject(entity);
+                Object val = metaObject.getValue(fieldName);
+
+                if (val == null) {
+                    throw new IllegalArgumentException("批量更新时，作为条件的字段 [" + fieldName + "] 值不能为空");
+                }
+
+                // 5. 构造参数 Context
+                // 结构必须是: { "et": entity, "params": { "列名": 值 } }
+                Map<String, Object> whereParams = new HashMap<>();
+                whereParams.put(dbColumnName, val);
+
+                Map<String, Object> context = new HashMap<>();
+                context.put("et", entity);
+                context.put("params", whereParams);
+
+                // 6. 发送命令
+                batchSession.update(statementId, context);
+
+                // 7. 分片刷新
+                if ((i + 1) % BATCH_SIZE == 0 || i == size - 1) {
+                    batchSession.flushStatements();
+                }
+            }
+            batchSession.commit();
+            batchSession.clearCache();
+        }
+    }
+
+    // =========================================================
+    // 5. 批量修改 - 完全自定义条件 (最高级)
+    // 场景：每一行的 WHERE 条件都很复杂，由调用者自己决定
+    // =========================================================
+
+    /**
+     * @param entityList        实体列表
+     * @param conditionProvider 回调接口，返回当前实体对应的 WHERE Map
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public <T> void updateBatchByCustom(List<T> entityList, java.util.function.Function<T, Map<String, Object>> conditionProvider) {
+        if (entityList == null || entityList.isEmpty()) return;
+
+        Class<?> entityClass = entityList.get(0).getClass();
+        injectIfNeed(entityClass);
+
+        String statementId = entityClass.getName() + "." + UpdateWithWhereEntity.METHOD_NAME;
+
+        try (SqlSession batchSession = sqlSessionFactory.openSession(ExecutorType.BATCH, false)) {
+            int size = entityList.size();
+            for (int i = 0; i < size; i++) {
+                T entity = entityList.get(i);
+
+                // 1. 回调获取条件
+                Map<String, Object> whereParams = conditionProvider.apply(entity);
+                if (whereParams == null || whereParams.isEmpty()) {
+                    throw new IllegalArgumentException("批量更新必须提供 Where 条件，禁止全表更新");
+                }
+
+                // 2. 构造 Context
+                Map<String, Object> context = new HashMap<>();
+                context.put("et", entity);
+                context.put("params", whereParams);
+
+                batchSession.update(statementId, context);
+
+                if ((i + 1) % BATCH_SIZE == 0 || i == size - 1) {
+                    batchSession.flushStatements();
+                }
+            }
+            batchSession.commit();
+            batchSession.clearCache();
+        }
     }
 
 }

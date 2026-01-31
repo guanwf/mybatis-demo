@@ -312,4 +312,59 @@ public class DynamicInjectorTest {
         log.info("{}",demos);
     }
 
+    @Test
+    public void TestDeletePatch(){
+        Demo demo = new Demo();
+        demo.setId(2004832441947L);
+        demo.setDemoid("123");
+        demo.setRemark("update");
+
+        Demo demo2 = new Demo();
+        demo2.setId(20048324414947L);
+        demo2.setDemoid("13");
+        demo2.setRemark("update");
+
+        List<Demo> demos=new ArrayList<>();
+        demos.add(demo);
+        demos.add(demo2);
+
+        int rowEffect = dynamicInjectorService.deleteBatchEntities(demos);
+        log.info("roweffect={}", rowEffect);
+
+    }
+
+
+    @Test
+    public void TestUpdatePatch(){
+        Demo demo = new Demo();
+        demo.setId(2004832441947L);
+        demo.setDemoid("123");
+        demo.setRemark("update");
+
+        Demo demo2 = new Demo();
+        demo2.setId(20048324414947L);
+        demo2.setDemoid("13");
+        demo2.setRemark("update");
+
+        List<Demo> rows=new ArrayList<>();
+        rows.add(demo);
+        rows.add(demo2);
+
+//        dynamicInjectorService.updateBatchById(rows);//根据id
+//        dynamicInjectorService.updateBatchByField(rows,"demoid");//根据自定义字段
+
+        //完全自定义条件批量更新
+        dynamicInjectorService.updateBatchByCustom(rows, entity -> {
+            // 针对每个实体，返回它的 Where 条件 Map
+            // 这里可以使用 MapBuilder 链式构建
+            return MapBuilder.create()
+                    .put("id", entity.getId())
+                    .put("flag", 0) // 只更新 flag 为 0 的旧数据
+                    .build();
+        });
+
+        log.info("roweffect={}", rows.size());
+
+    }
+
 }

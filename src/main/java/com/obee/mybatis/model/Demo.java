@@ -14,6 +14,7 @@ import java.time.LocalDateTime;
  */
 @Data
 public class Demo implements Serializable {
+
     @TableId(type = IdType.ASSIGN_ID) // 雪花算法ID
     private Long id;
 
